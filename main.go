@@ -1,15 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
 )
@@ -23,33 +22,40 @@ type InstanceInfo struct {
 	InstanceState string `json:"instanceState"`
 }
 
+// func main() {
+// 	// Load environment variables from .env file
+// 	if err := godotenv.Load(); err != nil {
+// 		fmt.Println("Error loading .env file:", err)
+// 		return
+// 	}
+
+// 	r := gin.Default()
+
+// 	r.POST("/instance", createEC2InstanceHandler)
+// 	r.POST("/ssh", doSomething)
+// 	r.GET("/instance/:id", getInstance)
+
+// 	r.Run(":3000")
+// }
+
 func main() {
-	// Load environment variables from .env file
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("Error loading .env file:", err)
 		return
 	}
 
-	r := gin.Default()
+	publicIP := "54.162.183.229"
+	sshIntoInstance(&publicIP)
 
-	r.POST("/instance", createEC2InstanceHandler)
-	r.POST("/ssh", doSomething)
-	r.GET("/instance/:id", getInstance)
-
-	r.Run(":3000")
 }
 
-func getInstance(context *gin.Context) {
-	// Retrieve instance ID from request parameters
-	instanceID := context.Param("id")
-
+func getInstance(id *string, region *string) (InstanceInfo, error) {
 	// Create a new AWS session using default credentials
 	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("us-east-1"),
+		Region: aws.String(*region),
 	})
 	if err != nil {
-		context.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
-		return
+		return InstanceInfo{}, err
 	}
 
 	// Create an EC2 service client
@@ -58,15 +64,14 @@ func getInstance(context *gin.Context) {
 	// Specify parameters for the describe instance request
 	describeInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []*string{
-			aws.String(instanceID),
+			aws.String(*id),
 		},
 	}
 
 	// Retrieve information about the EC2 instance
 	result, err := svc.DescribeInstances(describeInput)
 	if err != nil {
-		context.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to describe instance"})
-		return
+		return InstanceInfo{}, err
 	}
 
 	// Extract instance info
@@ -82,23 +87,21 @@ func getInstance(context *gin.Context) {
 			InstanceState: *instance.State.Name,
 		}
 	} else {
-		context.JSON(http.StatusNotFound, gin.H{"error": "No instance found with the specified ID"})
-		return
+		return InstanceInfo{}, errors.New("no instance found with the specified id")
 	}
 
-	// Return instance info as JSON response
-	context.JSON(http.StatusOK, instanceInfo)
+	return instanceInfo, nil
 }
 
-func createEC2InstanceHandler(context *gin.Context) {
+func createInstance(region *string) (*ec2.Reservation, error) {
 	// Create a new AWS session using default credentials
 	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("us-east-1"),
+		Region: aws.String(*region),
 	},
 	)
 	if err != nil {
-		context.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create AWS session"})
-		return
+		fmt.Println(err)
+		return &ec2.Reservation{}, errors.New("failed to create aws session")
 	}
 
 	// Create an EC2 service client
@@ -119,14 +122,13 @@ func createEC2InstanceHandler(context *gin.Context) {
 	result, err := svc.RunInstances(runInput)
 	if err != nil {
 		fmt.Println(err)
-		context.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to launch instance"})
-		return
+		return &ec2.Reservation{}, errors.New("failed to launch instance")
 	}
 
-	context.JSON(http.StatusOK, gin.H{"result": result})
+	return result, nil
 }
 
-func doSomething(context *gin.Context) {
+func sshIntoInstance(publicIP *string) {
 	// Read the private key file
 	keyPath := ".ssh/cloudservers.pem"
 	key, err := os.ReadFile(keyPath)
@@ -152,7 +154,7 @@ func doSomething(context *gin.Context) {
 	}
 
 	// Connect to the EC2 instance
-	conn, err := ssh.Dial("tcp", "your-ec2-public-ip:22", sshConfig)
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", *publicIP, 22), sshConfig)
 	if err != nil {
 		log.Fatalf("Failed to connect to EC2 instance: %v", err)
 	}
