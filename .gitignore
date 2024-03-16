@@ -21,6 +21,5 @@
 go.work
 
 .env
-.air.toml
 tmp
 .ssh
