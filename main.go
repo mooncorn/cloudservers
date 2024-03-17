@@ -1,14 +1,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/exec"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
 )
@@ -44,9 +52,110 @@ func main() {
 		return
 	}
 
-	publicIP := "54.162.183.229"
-	sshIntoInstance(&publicIP)
+	region := "us-east-1"
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String(region),
+	})
+	if err != nil {
+		log.Fatal("could not create session", err)
+	}
 
+	keyPath := ".ssh/cloudservers.pem"
+	scriptPath := "create-minecraft-container.sh"
+	instanceID := "i-08c7112608c7e20eb"
+
+	executeScriptOnInstance(sess, &instanceID, &keyPath, &scriptPath)
+}
+
+func executeScriptOnInstance(sess *session.Session, instanceID *string, keyPath *string, scriptPath *string) {
+	// Create an EC2 service client
+	svc := ec2.New(sess)
+
+	// Get the public IP address of the instance
+	describeParams := &ec2.DescribeInstancesInput{
+		InstanceIds: []*string{aws.String(*instanceID)},
+	}
+	result, err := svc.DescribeInstances(describeParams)
+	if err != nil {
+		fmt.Println("Error describing instance:", err)
+		return
+	}
+	instanceIP := *result.Reservations[0].Instances[0].PublicIpAddress
+	fmt.Println("Public IP address of the instance:", instanceIP)
+
+	cmd := exec.Command("ssh", "-i", *keyPath, fmt.Sprintf("ec2-user@%s", instanceIP), "bash", "-s")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Println("Error obtaining stdin pipe:", err)
+		return
+	}
+
+	// Open script file
+	scriptFile, err := os.Open(*scriptPath)
+	if err != nil {
+		fmt.Println("Error opening script file:", err)
+		return
+	}
+	defer scriptFile.Close()
+
+	// Write script content to stdin
+	_, err = io.Copy(stdin, scriptFile)
+	if err != nil {
+		fmt.Println("Error writing script to stdin:", err)
+		return
+	}
+	stdin.Close()
+
+	// Run the command
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Println("Error executing command:", err)
+		return
+	}
+
+	fmt.Println("Output:", string(output))
+}
+
+func createSSHConnection(publicIP *string, privateKey *string) *ssh.Client {
+	// SSH connection configuration
+	config := &ssh.ClientConfig{
+		User: "ec2-user",
+		Auth: []ssh.AuthMethod{
+			// Add your private key here
+			createSSHAuthMethod(*privateKey),
+		},
+		// Optionally, you can include HostKeyCallback to verify server's host key
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	// SSH connection establishment
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:22", *publicIP), config)
+	if err != nil {
+		log.Fatalf("Failed to dial: %s", err)
+	}
+	defer conn.Close()
+
+	return conn
+}
+
+func getDockerContainers(publicIP *string) {
+	// Connect to Docker on the EC2 instance
+	cli, err := client.NewClientWithOpts(client.WithHost(fmt.Sprintf("tcp://%s:2375", *publicIP)), client.WithAPIVersionNegotiation())
+	if err != nil {
+		panic(err)
+	}
+	defer cli.Close()
+
+	// List Docker containers
+	containers, err := cli.ContainerList(context.Background(), container.ListOptions{All: true})
+	if err != nil {
+		panic(err)
+	}
+
+	// Print container IDs
+	for _, container := range containers {
+		fmt.Println(container.ID)
+	}
 }
 
 func getInstance(id *string, region *string) (InstanceInfo, error) {
@@ -93,7 +202,7 @@ func getInstance(id *string, region *string) (InstanceInfo, error) {
 	return instanceInfo, nil
 }
 
-func createInstance(region *string) (*ec2.Reservation, error) {
+func createInstance(region *string) (string, error) {
 	// Create a new AWS session using default credentials
 	sess, err := session.NewSession(&aws.Config{
 		Region: aws.String(*region),
@@ -101,7 +210,7 @@ func createInstance(region *string) (*ec2.Reservation, error) {
 	)
 	if err != nil {
 		fmt.Println(err)
-		return &ec2.Reservation{}, errors.New("failed to create aws session")
+		return "", errors.New("failed to create aws session")
 	}
 
 	// Create an EC2 service client
@@ -122,58 +231,109 @@ func createInstance(region *string) (*ec2.Reservation, error) {
 	result, err := svc.RunInstances(runInput)
 	if err != nil {
 		fmt.Println(err)
-		return &ec2.Reservation{}, errors.New("failed to launch instance")
+		return "", errors.New("failed to launch instance")
 	}
 
-	return result, nil
+	// Check if there is at least one instance created
+	if len(result.Instances) == 0 {
+		fmt.Println("No instances created")
+		return "", errors.New("no instances created")
+	}
+
+	// Extract the instance ID from the first instance in the result
+	instanceID := *result.Instances[0].InstanceId
+
+	return instanceID, nil
 }
 
-func sshIntoInstance(publicIP *string) {
-	// Read the private key file
-	keyPath := ".ssh/cloudservers.pem"
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		log.Fatalf("Failed to read private key file: %v", err)
-	}
+func installDocker(conn *ssh.Client) {
+	cmd := "sudo yum update -y && sudo yum install -y docker"
+	executeCommand(conn, &cmd)
+	fmt.Println("Docker installed successfully")
+}
 
-	// Parse the private key
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		log.Fatalf("Failed to parse private key: %v", err)
-	}
+func enableRemoteConnection(conn *ssh.Client) {
+	cmd := "sudo mkdir -p /etc/systemd/system/docker.service.d && echo '[Service]\nExecStart=\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2375' | sudo tee /etc/systemd/system/docker.service.d/override.conf && sudo systemctl daemon-reload && sudo systemctl restart docker"
+	executeCommand(conn, &cmd)
+	fmt.Println("Docker remote connection enabled successfully")
+}
 
-	// SSH connection parameters
-	sshConfig := &ssh.ClientConfig{
-		User: "ec2-user", // SSH username
-		Auth: []ssh.AuthMethod{
-			// Use the parsed private key for authentication
-			ssh.PublicKeys(signer),
-		},
-		// Optionally, you can provide HostKeyCallback to verify the server's host key
-		// HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	// Connect to the EC2 instance
-	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", *publicIP, 22), sshConfig)
-	if err != nil {
-		log.Fatalf("Failed to connect to EC2 instance: %v", err)
-	}
-	defer conn.Close()
-
-	// Create a new SSH session
+func executeCommand(conn *ssh.Client, cmd *string) {
 	session, err := conn.NewSession()
 	if err != nil {
-		log.Fatalf("Failed to create SSH session: %v", err)
+		log.Fatalf("Failed to create session: %s", err)
 	}
 	defer session.Close()
 
-	// Execute a command on the remote instance
-	output, err := session.CombinedOutput("ls -l")
+	_, err = session.CombinedOutput(*cmd)
 	if err != nil {
-		log.Fatalf("Failed to execute command: %v", err)
+		log.Fatalf("Failed to execute command: %s", err)
+	}
+	fmt.Println("Command executed successfully")
+}
+
+func createSSHAuthMethod(privateKey string) ssh.AuthMethod {
+	key, err := os.ReadFile(privateKey)
+	if err != nil {
+		log.Fatalf("Unable to read private key: %v", err)
 	}
 
-	// Print the output of the command
-	fmt.Println("Output of 'ls -l' command:")
-	fmt.Println(string(output))
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		log.Fatalf("Unable to parse private key: %v", err)
+	}
+
+	return ssh.PublicKeys(signer)
+}
+
+func pullImage(client *client.Client, imageName string) error {
+	ctx := context.Background()
+	out, err := client.ImagePull(ctx, imageName, types.ImagePullOptions{})
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	return nil
+}
+
+func waitForImage(cli *client.Client, imageName string) error {
+	ctx := context.Background()
+	events, err := cli.Events(ctx, types.EventsOptions{})
+	timeout := time.After(10 * time.Second) // Set your desired timeout
+
+	for {
+		select {
+		case event := <-events:
+			fmt.Println(event)
+			if event.Type == "image" && event.Action == "pull" && event.Actor.Attributes["name"] == imageName && event.Status == "downloaded" {
+				return nil
+			}
+		case e := <-err:
+			log.Fatal(e)
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for image %s to be fully downloaded", imageName)
+		}
+	}
+}
+
+func createContainer(client *client.Client, imageName, containerName string) error {
+	ctx := context.Background()
+	containerConfig := &container.Config{
+		Image: imageName,
+		// Add other configurations if needed
+	}
+	hostConfig := &container.HostConfig{
+		// Add host configurations if needed
+	}
+	networkConfig := &network.NetworkingConfig{
+		// Add networking config
+	}
+	resp, err := client.ContainerCreate(ctx, containerConfig, hostConfig, networkConfig, nil, containerName)
+	if err != nil {
+		return err
+	}
+	if err := client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return err
+	}
+	return nil
 }
