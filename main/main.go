@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	mydocker "dasior/cloudservers/docker"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/ssh"
 )
@@ -52,19 +54,57 @@ func main() {
 		return
 	}
 
-	region := "us-east-1"
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	})
+	// region := "us-east-1"
+	// sess, err := session.NewSession(&aws.Config{
+	// 	Region: aws.String(region),
+	// })
+	// if err != nil {
+	// 	log.Fatal("could not create session", err)
+	// }
+
+	dockerService, err := mydocker.NewDockerService("54.91.26.120")
 	if err != nil {
-		log.Fatal("could not create session", err)
+		fmt.Println("Failed to create docker client: ", err)
+		return
+	}
+	defer dockerService.CloseDockerClient()
+
+	container, err := dockerService.CreateContainer(
+		&container.Config{
+			Image: "itzg/minecraft-server",
+			Env: []string{
+				"EULA=true",
+				"VERSION=latest",
+				"TYPE=spigot",
+			},
+		},
+		&container.HostConfig{
+			Binds: []string{
+				"container-data:/data",
+			},
+			PortBindings: nat.PortMap{
+				"25565/tcp": []nat.PortBinding{{HostPort: "25565"}},
+			},
+		})
+	if err != nil {
+		fmt.Println("Failed to create container:", err)
 	}
 
-	keyPath := ".ssh/cloudservers.pem"
-	scriptPath := "create-minecraft-container.sh"
-	instanceID := "i-08c7112608c7e20eb"
+	fmt.Println("created: ", container.ID, container.Name)
 
-	executeScriptOnInstance(sess, &instanceID, &keyPath, &scriptPath)
+	container, err = dockerService.GetContainer()
+	if err != nil {
+		fmt.Println("Failed to get container:", err)
+	}
+
+	fmt.Println("get: ", container.ID, container.Name)
+
+	container, err = dockerService.RemoveContainer()
+	if err != nil {
+		fmt.Println("Failed to remove container:", err)
+	}
+
+	fmt.Println("removed: ", container.ID, container.Name)
 }
 
 func executeScriptOnInstance(sess *session.Session, instanceID *string, keyPath *string, scriptPath *string) {
