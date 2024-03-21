@@ -45,7 +45,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
 
-6. Enable non-root privilages on host. This is required to execute docker commands remotely.
+6. (optional) Enable non-root privilages on host. This is required to execute docker commands remotely.
 
 ```
 sudo groupadd docker
@@ -63,7 +63,7 @@ This setup process allows to connect to an ec2 instance with remote docker ready
 ssh-add ~/.ssh/your-private-key
 ```
 
-2. Allow reusing a SSH connection for multiple invocations of the docker CLI.
+2. Allow reusing a SSH connection for multiple invocations of the docker CLI. (unsure if needed)
 
 ```
 echo -e "ControlMaster auto\nControlPath ~/.ssh/control-%C\nControlPersist yes" >> ~/.ssh/config

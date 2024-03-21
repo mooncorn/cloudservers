@@ -2,7 +2,12 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -16,7 +21,7 @@ type DockerService struct {
 }
 
 func NewDockerService(ip string) (*DockerService, error) {
-	cmd := exec.Command("ssh", "-L", "2375:localhost:2375", "ec2-user@"+ip)
+	cmd := exec.Command("ssh", "-v", "-o", "StrictHostKeyChecking=no", "-L", "2375:localhost:2375", "ec2-user@"+ip)
 
 	_, err := cmd.Output()
 	if err != nil {
@@ -31,6 +36,21 @@ func NewDockerService(ip string) (*DockerService, error) {
 	return &DockerService{
 		client: cli,
 	}, nil
+}
+
+func (ds *DockerService) Start() error {
+	ctx := context.Background()
+	container, err := ds.GetContainer()
+	if err != nil {
+		return err
+	}
+
+	err = ds.client.ContainerStart(ctx, container.ID, types.ContainerStartOptions{})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (ds *DockerService) GetContainer() (types.ContainerJSON, error) {
@@ -69,6 +89,8 @@ func (ds *DockerService) CreateContainer(containerConfig *container.Config, host
 		return types.ContainerJSON{}, errors.New("maximum number of containers exceeded")
 	}
 
+	ds.PullImage(containerConfig.Image)
+
 	_, err = ds.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
 		return types.ContainerJSON{}, err
@@ -99,7 +121,7 @@ func (ds *DockerService) UpdateContainerEnv(newEnv map[string]string) (types.Con
 	// Update only the environment variables in the container's configuration
 	containerInfo.Config.Env = mergeEnv(containerInfo.Config.Env, newEnv)
 
-	_, err = ds.RemoveContainer()
+	_, err = ds.DeleteContainer()
 	if err != nil {
 		return types.ContainerJSON{}, err
 	}
@@ -116,7 +138,7 @@ func (ds *DockerService) UpdateContainerResources(updateConfig container.UpdateC
 	return errors.New("function not implemented")
 }
 
-func (ds *DockerService) RemoveContainer() (types.ContainerJSON, error) {
+func (ds *DockerService) DeleteContainer() (types.ContainerJSON, error) {
 	ctx := context.Background()
 
 	container, err := ds.GetContainer()
@@ -166,4 +188,72 @@ func (ds *DockerService) CloseDockerClient() {
 	if ds.client != nil {
 		ds.client.Close()
 	}
+}
+
+func (ds *DockerService) PullImage(imageName string) error {
+	ctx := context.Background()
+
+	// Pull the Docker image
+	out, err := ds.client.ImagePull(ctx, imageName, types.ImagePullOptions{})
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Decode the JSON messages from the pull output stream
+	decoder := json.NewDecoder(out)
+	for {
+		var msg map[string]interface{}
+		if err := decoder.Decode(&msg); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		// Print out the progress message
+		if status, ok := msg["status"]; ok {
+			fmt.Printf("Download progress: %s\n", status)
+		}
+	}
+
+	return nil
+}
+
+func (ds *DockerService) StreamLogs() error {
+	ctx := context.Background()
+
+	container, err := ds.GetContainer()
+	if err != nil {
+		return err
+	}
+
+	// Set options for log streaming
+	options := types.ContainerLogsOptions{
+		Follow:     true, // Set to true to continuously stream logs
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "all", // Retrieve all logs
+	}
+
+	// Call the API to get a reader for container logs
+	reader, err := ds.client.ContainerLogs(ctx, container.ID, options)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	// Create a Goroutine to continuously read and display the logs
+	go func() {
+		_, err := io.Copy(io.MultiWriter(os.Stdout), reader)
+		if err != nil && err != io.EOF {
+			log.Fatal(err)
+		}
+	}()
+
+	// Wait for user to exit the program (you can use any method here)
+	var input string
+	fmt.Scanln(&input)
+
+	return nil
 }
