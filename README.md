@@ -4,6 +4,22 @@ Cloudservers allows hosting of various docker images.
 
 Manages EC2 instances using docker remote access.
 
+## Getting Started
+
+1. Install Go
+2. Install project dependancies 
+3. Add ssh key.
+
+```
+ssh-add ~/.ssh/your-private-key
+```
+
+2. Allow reusing a SSH connection for multiple invocations of the docker CLI.
+
+```
+echo -e "ControlMaster auto\nControlPath ~/.ssh/control-%C\nControlPersist yes" >> ~/.ssh/config
+```
+
 ## Instance Setup
 
 Once the instance is created, it must go through the setup process before it is ready to host docker containers. This setup assumes that the instance is running Amazon Linux 2.
@@ -51,22 +67,6 @@ sudo systemctl restart docker
 sudo groupadd docker
 sudo usermod -aG docker $USER
 newgrp docker
-```
-
-## Client Setup
-
-This setup process allows to connect to an ec2 instance with remote docker ready.
-
-1. Add ssh key.
-
-```
-ssh-add ~/.ssh/your-private-key
-```
-
-2. Allow reusing a SSH connection for multiple invocations of the docker CLI. (unsure if needed)
-
-```
-echo -e "ControlMaster auto\nControlPath ~/.ssh/control-%C\nControlPersist yes" >> ~/.ssh/config
 ```
 
 ## Connecting to remote host
